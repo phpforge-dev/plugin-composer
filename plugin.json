@@ -1,0 +1,39 @@
+{
+  "id": "phpforge.composer",
+  "name": "Composer",
+  "version": "1.0.0",
+  "minIdeVersion": "0.2.11",
+  "description": "Composer: separate Rust tool service and workbench integration.",
+  "main": "main.js",
+  "activation": {
+    "languages": [
+      "php",
+      "json"
+    ],
+    "files": []
+  },
+  "permissions": [
+    "project.read",
+    "native.tool",
+    "workbench"
+  ],
+  "tool": {
+    "protocolVersion": 1,
+    "methods": [
+      "composerRun",
+      "composerCancel",
+      "composerProbe",
+      "composerSearch",
+      "composerVersions"
+    ],
+    "event": "composer-progress",
+    "workbench": "workbench.js",
+    "style": "workbench.css",
+    "binaries": {
+      "aarch64-macos": {
+        "path": "bin/aarch64-macos/phpforge-composer",
+        "sha256": "4fffa57aa0e5138fbf626dba3813981737fdcb6c9009cfd4132b6d7e78c45ee7"
+      }
+    }
+  }
+}

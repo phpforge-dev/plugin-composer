@@ -1,0 +1,14 @@
+import {readFile,writeFile,mkdir,copyFile} from 'node:fs/promises';
+import {createHash} from 'node:crypto';
+import {join} from 'node:path';
+const manifest=JSON.parse(await readFile('plugin.json','utf8'));
+const platform=process.argv[2]||`${process.arch==='arm64'?'aarch64':process.arch==='x64'?'x86_64':process.arch}-${process.platform==='darwin'?'macos':process.platform==='win32'?'windows':process.platform}`;
+const extension=platform.endsWith('-windows')?'.exe':'';
+const name='phpforge-'+manifest.id.slice('phpforge.'.length)+extension;
+const source=process.argv[3]||join('native','target','release',name);
+const path=join('bin',platform,name).replaceAll('\\','/');
+await mkdir(join('bin',platform),{recursive:true});await copyFile(source,path);
+manifest.tool.binaries[platform]={path,sha256:createHash('sha256').update(await readFile(path)).digest('hex')};
+manifest.tool.binaries=Object.fromEntries(Object.entries(manifest.tool.binaries).sort());
+await writeFile('plugin.json',JSON.stringify(manifest,null,2)+'\n');
+console.log(platform+' binary recorded');

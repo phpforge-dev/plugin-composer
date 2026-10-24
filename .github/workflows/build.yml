@@ -1,0 +1,65 @@
+name: Build native plugin
+on:
+  push:
+    branches: [main]
+    paths-ignore: ['bin/**', 'plugin.json']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-22.04
+            platform: x86_64-linux
+            target: x86_64-unknown-linux-gnu
+          - runner: windows-latest
+            platform: x86_64-windows
+            target: x86_64-pc-windows-msvc
+          - runner: macos-14
+            platform: aarch64-macos
+            target: aarch64-apple-darwin
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - run: npm ci --ignore-scripts
+      - run: npm run build
+      - run: git diff --exit-code -- main.js workbench.js
+      - run: cargo test --locked --manifest-path native/Cargo.toml
+      - run: cargo build --release --locked --manifest-path native/Cargo.toml --target ${{ matrix.target }}
+      - name: Record platform binary
+        run: node scripts/record-binary.mjs ${{ matrix.platform }} native/target/${{ matrix.target }}/release/phpforge-composer${{ runner.os == 'Windows' && '.exe' || '' }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.platform }}
+          path: bin/${{ matrix.platform }}/*
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - run: node scripts/merge-binaries.mjs
+      - name: Publish prebuilt plugin assets
+        run: |
+          git config user.name 'phpforge plugin builds'
+          git config user.email 'builds@phpforge.dev'
+          git add bin plugin.json
+          git diff --cached --quiet || git commit -m 'Publish verified native binaries for macOS, Windows and Linux'
+          git push
