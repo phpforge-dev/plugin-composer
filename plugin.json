@@ -33,15 +33,15 @@
     "binaries": {
       "aarch64-macos": {
         "path": "bin/aarch64-macos/phpforge-composer",
-        "sha256": "8e9765b4e7d3124cae0f32aaf232fd47f15c86d2e028c3890307dc37e32f8949"
+        "sha256": "3a7d19922a05d7efb66288ece87dec59a273d28fa4864f203caf3934f06ebb3c"
       },
       "x86_64-linux": {
         "path": "bin/x86_64-linux/phpforge-composer",
-        "sha256": "85a2a8a9f663eeab8c69914d7e46c5a231ff39fffca58b46330556a10020a956"
+        "sha256": "8f75edf11c98037eb4cc0c740b367e04730293184a75410c77c16b158cca2c4b"
       },
       "x86_64-windows": {
         "path": "bin/x86_64-windows/phpforge-composer.exe",
-        "sha256": "9368af7b2dbf0e8eccf8c473685f1a29da83044c968daa943f0a80250248b90b"
+        "sha256": "177aed5d05c3dd01d0b677b00c853a65353d667abf4c82c7a03a55519bfea40e"
       }
     }
   }
