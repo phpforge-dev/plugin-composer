@@ -1,5 +1,5 @@
 // Composer: só comandos fixos (install, update, require, remove, dump-autoload, run-script,
-// validate) com nomes de pacote, restrições e scripts validados, sem shell e com cwd na raiz do
+// validate, why, why-not) com nomes de pacote, restrições e scripts validados, sem shell e com cwd na raiz do
 // projeto. O executável vem do PATH, de um caminho escolhido (`composer`/`composer*.phar`) ou da
 // imagem Docker oficial com só a raiz do projeto montada. Saída em streaming por `composer-progress`.
 use crate::workspace::{confined, err, Res};
@@ -216,6 +216,24 @@ pub fn plan(root: &Path, request: &Value) -> Res<Vec<String>> {
             a
         }
         "validate" => vec!["validate".into(), "--no-check-publish".into()],
+        // why/why-not: só leitura; um pacote (e a versão desejada no why-not).
+        "why" | "why-not" => {
+            let action = request["action"].as_str().unwrap_or_default();
+            let [p] = packages.as_slice() else { return Err("Informe um pacote".into()) };
+            let (name, version) = match p.split_once(':') {
+                Some((n, v)) => (n.trim().to_owned(), v.trim().to_owned()),
+                None => (p.clone(), String::new()),
+            };
+            package(&name, false)?;
+            let mut a = vec![action.to_owned(), name];
+            if action == "why-not" {
+                constraint(&version).map_err(|_| "Informe a versão desejada (ex.: ^3.0) para o why-not".to_owned())?;
+                a.push(version);
+            } else if !version.is_empty() {
+                return Err("why não recebe versão; use why-not".into());
+            }
+            a
+        }
         "run-script" => {
             let script = request.get("script").and_then(Value::as_str).unwrap_or("");
             if script.is_empty()
@@ -681,6 +699,24 @@ mod test {
         }
         let out = tokio::time::timeout(Duration::from_secs(10), job).await.unwrap().unwrap().unwrap();
         assert_eq!(out["cancelled"], true);
+    }
+
+    #[test]
+    fn why_e_why_not_validam_pacote_e_versao() {
+        let (_dir, root) = project("");
+        let p = |v: Value| plan(&root, &v);
+        assert_eq!(p(json!({"action":"why","packages":["psr/log"]})).unwrap()[..2], ["why", "psr/log"]);
+        assert_eq!(p(json!({"action":"why-not","packages":["psr/log:^3.0"]})).unwrap()[..3], ["why-not", "psr/log", "^3.0"]);
+        for bad in [
+            json!({"action":"why","packages":[]}),
+            json!({"action":"why","packages":["a/b","c/d"]}),
+            json!({"action":"why","packages":["a/b:^1"]}),
+            json!({"action":"why-not","packages":["a/b"]}),
+            json!({"action":"why-not","packages":["a/b:--help"]}),
+            json!({"action":"why","packages":["--tree"]}),
+        ] {
+            assert!(p(bad.clone()).is_err(), "{bad}");
+        }
     }
 
     #[test]

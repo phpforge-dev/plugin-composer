@@ -18,7 +18,7 @@ function mountComposer(api: IdeApi, host: Host) {
  const panel = document.createElement('section'); panel.id = 'composer-panel'; panel.hidden = true;
  panel.innerHTML = html`<div id="composer-resize" class="tool-window-resize" role="separator" tabindex="0" aria-label="Altura do Composer" aria-orientation="horizontal"></div>
 <div class="composer-toolbar"><strong>Composer</strong><span id="composer-runner-label"></span>
-<button data-composer="install" title="Instalar as versões do composer.lock">Install</button><button data-composer="update" title="Atualizar todas as dependências">Update</button><button id="composer-require" title="Buscar no Packagist e adicionar dependência">Require…</button><button data-composer="dump-autoload" title="Regenerar o autoload otimizado">Dump autoload</button><button data-composer="validate" title="Validar composer.json e composer.lock">Validate</button><button data-check="outdated" title="Dependências diretas com versões mais novas (composer outdated --direct)">Outdated</button><button data-check="audit" title="Avisos de segurança e pacotes abandonados no composer.lock (composer audit)">Audit</button>
+<button data-composer="install" title="Instalar as versões do composer.lock">Install</button><button data-composer="update" title="Atualizar todas as dependências">Update</button><button id="composer-require" title="Buscar no Packagist e adicionar dependência">Require…</button><button data-composer="dump-autoload" title="Regenerar o autoload otimizado">Dump autoload</button><button data-composer="validate" title="Validar composer.json e composer.lock">Validate</button><button data-check="outdated" title="Dependências diretas com versões mais novas (composer outdated --direct)">Outdated</button><button data-check="audit" title="Avisos de segurança e pacotes abandonados no composer.lock (composer audit)">Audit</button><button id="composer-why" title="Por que um pacote está instalado ou não pode ser instalado (composer why / why-not)">Why…</button>
 <select id="composer-script" aria-label="Script do composer.json"></select><button id="composer-run-script" title="Executar script">▶</button>
 <button id="composer-stop" disabled>■ Interromper</button><button id="composer-settings" aria-expanded="false" title="Executável do Composer">⚙</button><button id="composer-hide" aria-label="Ocultar Composer">−</button></div>
 <form id="composer-config" hidden><label>Executar com <select id="composer-mode"><option value="auto">PATH ou composer.phar do projeto</option><option value="path">Caminho do executável</option><option value="docker">Docker (imagem oficial)</option></select></label>
@@ -29,7 +29,10 @@ function mountComposer(api: IdeApi, host: Host) {
 <div class="composer-layout"><div id="composer-packages" role="list" aria-label="Dependências"></div><pre id="composer-output" tabindex="0" aria-label="Saída do Composer"></pre></div>
 <dialog id="composer-dialog" class="composer-dialog"><form method="dialog"><h2>Adicionar dependência</h2><input id="composer-query" type="search" placeholder="Buscar no Packagist (ex.: monolog)" autocomplete="off" spellcheck="false" aria-label="Pacote"><div id="composer-results" role="listbox" aria-label="Resultados do Packagist"></div><p id="composer-search-state" role="status"></p>
 <div class="composer-dialog-row"><label>Versão <input id="composer-constraint" list="composer-versions" placeholder="vazio = mais recente estável" spellcheck="false"></label><datalist id="composer-versions"></datalist><label><input id="composer-dev" type="checkbox"> require-dev</label></div>
-<div class="composer-dialog-actions"><button value="cancel" formnovalidate>Cancelar</button><button id="composer-add" value="add" disabled>Adicionar</button></div></form></dialog>`;
+<div class="composer-dialog-actions"><button value="cancel" formnovalidate>Cancelar</button><button id="composer-add" value="add" disabled>Adicionar</button></div></form></dialog>
+<dialog id="composer-why-dialog" class="composer-dialog"><form method="dialog"><h2>Por que…</h2><label>Pacote <input id="composer-why-package" list="composer-why-packages" placeholder="vendor/pacote" autocomplete="off" spellcheck="false"></label><datalist id="composer-why-packages"></datalist>
+<label>Versão desejada <input id="composer-why-version" placeholder="vazio = why (quem depende); ex.: ^3.0 = why-not" spellcheck="false"></label><p id="composer-why-state" role="status"></p>
+<div class="composer-dialog-actions"><button value="cancel" formnovalidate>Cancelar</button><button id="composer-why-run" value="run">Mostrar</button></div></form></dialog>`;
  document.querySelector('.code')!.append(panel);
  const button = document.createElement('button'); button.id = 'show-composer';
  toolIcon(button, '<path d="M12 3 4 7v10l8 4 8-4V7z"/><path d="m4 7 8 4 8-4M12 11v10"/>', tr('Composer'));
@@ -69,7 +72,7 @@ function mountComposer(api: IdeApi, host: Host) {
  };
 
  function controls() {
-  panel.querySelectorAll<HTMLButtonElement>('[data-composer],#composer-require,#composer-run-script,.composer-row button').forEach(b => b.disabled = !!running);
+  panel.querySelectorAll<HTMLButtonElement>('[data-composer],#composer-require,#composer-why,#composer-run-script,.composer-row button').forEach(b => b.disabled = !!running);
   el<HTMLButtonElement>('composer-run-script').disabled ||= !el<HTMLSelectElement>('composer-script').value;
   el<HTMLButtonElement>('composer-stop').disabled = !running;
  }
@@ -87,11 +90,13 @@ function mountComposer(api: IdeApi, host: Host) {
    const name = document.createElement('button'); name.type = 'button'; name.className = 'composer-name'; name.textContent = row.name; name.title = tr('Abrir composer.json do pacote em vendor');
    name.onclick = () => { void host.open(`vendor/${row.name.toLowerCase()}/composer.json`).catch(() => summary(msg`${row.name} não está instalado em vendor. Rode composer install.`, 'error')); };
    const detail = document.createElement('small'); detail.textContent = `${row.constraint}${row.installed ? ` · ${row.installed}` : row.name.includes('/') && lock ? tr(' · fora do lock') : ''}${row.dev ? ' · dev' : ''}`;
+   const why = document.createElement('button'); why.type = 'button'; why.textContent = '?'; why.title = msg`Por que ${row.name} está instalado (composer why)`; why.setAttribute('aria-label', why.title); why.hidden = !row.name.includes('/');
+   why.onclick = () => void run({ action: 'why', packages: [row.name] });
    const update = document.createElement('button'); update.type = 'button'; update.textContent = '↻'; update.title = msg`Atualizar ${row.name}`; update.setAttribute('aria-label', update.title); update.hidden = !row.name.includes('/');
    update.onclick = () => void run({ action: 'update', packages: [row.name] });
    const remove = document.createElement('button'); remove.type = 'button'; remove.textContent = '✕'; remove.title = msg`Remover ${row.name}`; remove.setAttribute('aria-label', remove.title);
    remove.onclick = () => { if (remove.dataset.confirm) { void run({ action: 'remove', packages: [row.name], dev: row.dev }); return; } remove.dataset.confirm = '1'; remove.textContent = tr('Remover?'); setTimeout(() => { delete remove.dataset.confirm; remove.textContent = '✕'; }, 4000); };
-   detail.append(...rowBadges(row.name)); item.append(name, detail, update, remove); return item;
+   detail.append(...rowBadges(row.name)); item.append(name, detail, why, update, remove); return item;
   }));
   const select = el<HTMLSelectElement>('composer-script'); const previous = select.value;
   select.replaceChildren(new Option(tr('Scripts…'), ''), ...scriptNames(text).map(n => new Option(n, n)));
@@ -197,6 +202,17 @@ function mountComposer(api: IdeApi, host: Host) {
   try { await insights.check([kind]); const error = checkState.errors[kind]; if (error) summary(msg`${error} · Corrija e tente novamente.`, 'error'); else { report(kind); summary(insightSummary(insights.insights), 'passed'); } }
   finally { b.disabled = false; }
  });
+ const whyDialog = el<HTMLDialogElement>('composer-why-dialog');
+ el('composer-why').onclick = () => {
+  el('composer-why-packages').replaceChildren(...rows.map(r => new Option(r.name))); el('composer-why-state').textContent = '';
+  whyDialog.showModal(); el('composer-why-package').focus();
+ };
+ el('composer-why-run').onclick = event => {
+  event.preventDefault();
+  const name = el<HTMLInputElement>('composer-why-package').value.trim().toLowerCase(); const version = el<HTMLInputElement>('composer-why-version').value.trim();
+  if (!/^[a-z0-9]([_.-]?[a-z0-9]+)*\/[a-z0-9](([_.]|-{1,2})?[a-z0-9]+)*$|^(php|ext-[a-z0-9_-]+)$/.test(name)) { el('composer-why-state').textContent = tr('Informe o nome completo do pacote (vendor/pacote).'); return; }
+  whyDialog.close(); void run(version ? { action: 'why-not', packages: [`${name}:${version}`] } : { action: 'why', packages: [name] });
+ };
 
  function hide() { panel.hidden = true; button.setAttribute('aria-pressed', 'false'); }
  function show() { open(); void load(); }
