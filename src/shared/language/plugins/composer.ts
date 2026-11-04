@@ -331,6 +331,7 @@ export class ComposerPlugin implements IdePlugin {
   if (require) {
    out.push({ line: line(require.keyStart), title: '▶ composer install', tooltip: 'Instala as versões do composer.lock', command: 'php-ide.composer', arguments: [{ action: 'install' } satisfies ComposerRequest] });
    out.push({ line: line(require.keyStart), title: '↻ composer update', tooltip: 'Atualiza todas as dependências e o composer.lock', command: 'php-ide.composer', arguments: [{ action: 'update' } satisfies ComposerRequest] });
+   out.push({ line: line(require.keyStart), title: 'Mostrar log', tooltip: 'Saída dos comandos do Composer executados pela IDE (Composer Log)', command: 'php-ide.composer', arguments: [{ show: 'log' }] });
   }
   for (const s of scriptEntries(text)) out.push({ line: line(s.keyStart), title: `▶ Executar ${s.name}`, tooltip: `composer run-script ${s.name}`, command: 'php-ide.composer', arguments: [{ action: 'run-script', script: s.name } satisfies ComposerRequest] });
   return out;

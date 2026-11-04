@@ -31,7 +31,7 @@ try{
    read:async path=>{if(path==='composer.json')return {text:JSON.stringify(composer,null,2)};if(path==='composer.lock')return {text:JSON.stringify(lock)};throw Error('missing')},
    onComposerProgress:fn=>{progress=fn;return()=>{}},
    composerCheck:async(kind,runner)=>{window.calls.push('check:'+kind+':'+runner.mode);await new Promise(r=>setTimeout(r,30));if(window.checkError)throw window.checkError;return {kind,command:'composer '+kind,exitCode:kind==='audit'?1:0,result:fixtures[kind]};},
-   composerRun:async(id,runner,request)=>{window.calls.push('run:'+[request.action,...(request.packages??[])].join(' '));const text=request.action==='why-not'?'There is no installed package depending on "psr/log" in versions not matching 3.0\n':'guzzlehttp/guzzle 7.4.0 requires guzzlehttp/promises (^1.5)\n';progress({id,text});return {command:'composer '+request.action,exitCode:0,cancelled:false,timedOut:false,durationMs:120,output:text};},
+   composerRun:async(id,runner,request)=>{window.calls.push('run:'+[request.action,...(request.packages??[])].join(' '));if(window.runError)return {command:'/usr/local/bin/composer '+request.action+' --no-interaction',exitCode:2,cancelled:false,timedOut:false,durationMs:80,output:window.runError+'\n'};const text=request.action==='why-not'?'There is no installed package depending on "psr/log" in versions not matching 3.0\n':'guzzlehttp/guzzle 7.4.0 requires guzzlehttp/promises (^1.5)\n';progress({id,text});return {command:['composer',request.action,...(request.packages??[]),'--no-interaction','--no-ansi'].join(' '),exitCode:0,cancelled:false,timedOut:false,durationMs:120,output:text};},
    composerCancel:async()=>{},composerProbe:async()=>({version:'Composer version 2.11.1'}),composerSearch:async()=>[],composerVersions:async()=>[],
   };
   const editor={onMouseDown:()=>disposable,onDidChangeModel:()=>disposable,getModel:()=>null,getContainerDomNode:()=>document.body,createDecorationsCollection:()=>({set(){},clear(){}}),trigger(){}};
@@ -40,9 +40,10 @@ try{
   const keymap={registerAction:spec=>{window.actions.push(spec.id+(spec.context?'@'+spec.context:'')+':'+(spec.defaults?.mac??''));return()=>{}},defineContext:()=>()=>{}};
   const html=(s,...v)=>typeof s==='string'?s:s.reduce((a,x,i)=>a+x+(v[i]??''),'');
   const toolIcon=(b,path,label)=>{b.title=label;b.innerHTML='<svg viewBox="0 0 24 24">'+path+'</svg>'};
-  const dockWindow=(panel,button)=>()=>{panel.hidden=false;button.setAttribute('aria-pressed','true')};
+  // Mesma semântica do host (src/tool-plugins.ts): abrir uma janela de baixo fecha as outras.
+  const dockWindow=(panel,button,hide)=>{document.addEventListener('ide-dock-open',e=>{if(e.detail!==panel.id)hide()});return()=>{document.dispatchEvent(new CustomEvent('ide-dock-open',{detail:panel.id}));panel.hidden=false;button.setAttribute('aria-pressed','true')};};
   const {activate}=await import('/workbench.js');
-  window.controller=activate({monaco,listen:async()=>()=>{},tr:s=>s,msg:html,html,keymap,dockWindow,resizeToolWindow(){},toolIcon,own:v=>v,api,host:{status(){},open:async()=>{},changed(){},editor}});
+  window.controller=activate({monaco,listen:async()=>()=>{},tr:s=>s,msg:html,html,keymap,dockWindow,resizeToolWindow(){},toolIcon,own:v=>v,api,host:{status(){},open:async p=>{(window.opened??=[]).push(p)},changed(){},editor}});
  },fixtures);
  const text=selector=>page.locator(selector).textContent();
  assert.ok((await page.evaluate(()=>window.actions)).includes('composer.showIntentions@composer-json:'),'intentions action without its own ⌥Enter (the host binds it for plugin documents)');
@@ -77,13 +78,44 @@ try{
  // Why (row button) and why-not (dialog), streamed into the log like any Composer command.
  await guzzle.locator('button[title^="Por que"]').click();
  await page.waitForFunction(()=>document.getElementById('composer-summary').dataset.state==='passed'&&/why/.test(document.getElementById('composer-summary').textContent));
- assert.match(await text('#composer-output'),/requires guzzlehttp\/promises/);
+ // Composer Log separado: a janela Composer continua aberta; o log acumula cada comando.
+ assert.equal(await page.locator('#composer-panel').isVisible(),true,'run from the window keeps the window');
+ assert.equal(await page.locator('#show-composer-log').isVisible(),true,'log tool button appears after the first command');
+ await page.locator('#composer-show-log').click();
+ assert.equal(await page.locator('#composer-panel').isVisible(),false);assert.equal(await page.locator('#composer-log-panel').isVisible(),true);
+ const first=page.locator('.composer-log-entry').first();
+ assert.equal(await first.locator('.composer-log-command').textContent(),'why guzzlehttp/guzzle --no-interaction --no-ansi','arguments without the executable, as in PhpStorm');
+ assert.equal(await first.getAttribute('data-state'),'passed');assert.equal(await first.getAttribute('data-folded'),'true','successful run folded');
+ assert.match(await first.locator('.composer-log-fold').getAttribute('title'),/requires guzzlehttp\/promises/,'hover preview of the folded output');
+ await first.locator('.composer-log-fold').click();
+ assert.match(await first.locator('.composer-log-output').textContent(),/requires guzzlehttp\/promises/);
+ await first.locator('.composer-log-rerun').click();
+ await page.waitForFunction(()=>document.querySelectorAll('.composer-log-entry').length===2&&document.querySelectorAll('.composer-log-entry')[1].dataset.state==='passed');
+ assert.deepEqual((await page.evaluate(()=>window.calls)).filter(c=>c==='run:why guzzlehttp/guzzle').length,2,'▶ reruns the same command');
+ // Falha: entrada aberta com a mensagem, link para composer.json clicável.
+ await page.evaluate(()=>{window.runError='Your requirements could not be resolved. Check ./composer.json';});
+ await page.locator('.composer-log-entry').first().locator('.composer-log-rerun').click();
+ await page.waitForFunction(()=>document.querySelectorAll('.composer-log-entry')[2]?.dataset.state==='failed');
+ const failed=page.locator('.composer-log-entry').nth(2);
+ assert.equal(await failed.getAttribute('data-folded'),'false','failure stays expanded');
+ await failed.locator('.composer-log-output a').click();
+ assert.deepEqual(await page.evaluate(()=>window.opened),['composer.json']);
+ await page.evaluate(()=>{window.runError=null;});
+ await page.locator('#composer-log-clear').click();
+ assert.equal(await page.locator('.composer-log-entry').count(),0);
+ await page.locator('#show-composer').click();
  await page.locator('#composer-why').click();
  await page.locator('#composer-why-package').fill('Not A Package');await page.locator('#composer-why-run').click();
  assert.match(await text('#composer-why-state'),/nome completo/);assert.equal(await page.locator('#composer-why-dialog').evaluate(d=>d.open),true,'invalid input keeps the dialog');
  await page.locator('#composer-why-package').fill('psr/log');await page.locator('#composer-why-version').fill('3.0');await page.locator('#composer-why-run').click();
  await page.waitForFunction(()=>window.calls.includes('run:why-not psr/log:3.0'));
- await page.waitForFunction(()=>/no installed package depending/.test(document.getElementById('composer-output').textContent));
+ await page.locator('#composer-show-log').click();
+ const whyNot=page.locator('.composer-log-entry').last();
+ assert.equal(await whyNot.locator('.composer-log-command').textContent(),'why-not psr/log:3.0 --no-interaction --no-ansi');
+ await whyNot.locator('.composer-log-fold').click();
+ assert.match(await whyNot.locator('.composer-log-output').textContent(),/no installed package depending/);
+ await page.screenshot({path:'tests/composer-log.png'});
+ await page.locator('#show-composer').click();
 
  // Automatic checks can be turned off (persisted with the runner settings).
  await page.locator('#composer-settings').click();

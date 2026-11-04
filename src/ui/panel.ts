@@ -1,6 +1,7 @@
 import { scriptNames, type ComposerRequest } from '../shared/language/plugins/composer';
 import { insightSummary, type Insights } from '../shared/composer-insights';
 import { mountEditorInsights, type CheckKind } from './editor-insights';
+import { ComposerLog, foldPreview, linkify, logCommand, type LogEntry } from '../shared/composer-log';
 export function activate(sdk:any){
 const {monaco,listen,tr,msg,html,keymap,dockWindow,resizeToolWindow,toolIcon,own}=sdk;
 
@@ -25,7 +26,7 @@ function mountComposer(api: IdeApi, host: Host) {
 <label id="composer-path-field">Caminho <input id="composer-path" placeholder="/usr/local/bin/composer ou …/composer.phar" spellcheck="false"></label><label id="composer-image-field">Imagem <input id="composer-image" placeholder="composer:2" spellcheck="false"></label>
 <label><input id="composer-check-updates" type="checkbox"> Verificar atualizações de pacotes</label><label><input id="composer-check-audit" type="checkbox"> Auditar segurança (composer audit)</label>
 <button id="composer-probe" type="submit">Salvar e testar</button><span id="composer-probe-result" role="status"></span></form>
-<p id="composer-summary" role="status" aria-live="polite">Use as ações acima ou o ▶ no composer.json.</p><p id="composer-insights" role="status"></p>
+<div class="composer-summary-row"><p id="composer-summary" role="status" aria-live="polite">Use as ações acima ou o ▶ no composer.json.</p><button id="composer-show-log" type="button" title="Saída dos comandos executados (Composer Log)">Mostrar log</button></div><p id="composer-insights" role="status"></p>
 <div class="composer-layout"><div id="composer-packages" role="list" aria-label="Dependências"></div><pre id="composer-output" tabindex="0" aria-label="Saída do Composer"></pre></div>
 <dialog id="composer-dialog" class="composer-dialog"><form method="dialog"><h2>Adicionar dependência</h2><input id="composer-query" type="search" placeholder="Buscar no Packagist (ex.: monolog)" autocomplete="off" spellcheck="false" aria-label="Pacote"><div id="composer-results" role="listbox" aria-label="Resultados do Packagist"></div><p id="composer-search-state" role="status"></p>
 <div class="composer-dialog-row"><label>Versão <input id="composer-constraint" list="composer-versions" placeholder="vazio = mais recente estável" spellcheck="false"></label><datalist id="composer-versions"></datalist><label><input id="composer-dev" type="checkbox"> require-dev</label></div>
@@ -34,20 +35,69 @@ function mountComposer(api: IdeApi, host: Host) {
 <label>Versão desejada <input id="composer-why-version" placeholder="vazio = why (quem depende); ex.: ^3.0 = why-not" spellcheck="false"></label><p id="composer-why-state" role="status"></p>
 <div class="composer-dialog-actions"><button value="cancel" formnovalidate>Cancelar</button><button id="composer-why-run" value="run">Mostrar</button></div></form></dialog>`;
  document.querySelector('.code')!.append(panel);
+ // Composer Log: janela própria (no PhpStorm é uma aba da janela Run; o host não expõe a Run a plugins).
+ const logPanel = document.createElement('section'); logPanel.id = 'composer-log-panel'; logPanel.hidden = true;
+ logPanel.innerHTML = html`<div id="composer-log-resize" class="tool-window-resize" role="separator" tabindex="0" aria-label="Altura do Composer Log" aria-orientation="horizontal"></div>
+<div class="composer-toolbar"><strong>Composer Log</strong><span class="composer-log-hint"></span><button id="composer-log-clear" title="Limpar o log (execuções terminadas)">Limpar</button><button id="composer-log-hide" aria-label="Ocultar Composer Log">−</button></div>
+<div id="composer-log" role="log" aria-label="Composer Log" tabindex="0"><p class="composer-empty">Nenhum comando executado nesta sessão.</p></div>`;
+ document.querySelector('.code')!.append(logPanel);
+ const logButton = document.createElement('button'); logButton.id = 'show-composer-log'; logButton.hidden = true;
+ toolIcon(logButton, '<path d="M5 4h14v16H5z"/><path d="M8 8h8M8 12h8M8 16h5"/>', tr('Composer Log'));
+ document.querySelector('.left-rail')!.append(logButton);
  const button = document.createElement('button'); button.id = 'show-composer';
  toolIcon(button, '<path d="M12 3 4 7v10l8 4 8-4V7z"/><path d="m4 7 8 4 8-4M12 11v10"/>', tr('Composer'));
  document.querySelector('.left-rail')!.append(button);
  const el = <T extends HTMLElement = HTMLElement>(id: string) => panel.querySelector('#'+id) as T;
  const open = dockWindow(panel, button, hide);
  resizeToolWindow(panel, el('composer-resize'), 'php-ide-composer-height');
+ const openLog = dockWindow(logPanel, logButton, hideLog);
+ resizeToolWindow(logPanel, logPanel.querySelector('#composer-log-resize') as HTMLElement, 'php-ide-composer-log-height');
+ const log = new ComposerLog(); const logList = logPanel.querySelector('#composer-log') as HTMLElement;
+ const stateText = (e: LogEntry) => e.state === 'running' ? tr('em execução…') : `${e.state === 'passed' ? tr('concluído') : e.state === 'cancelled' ? tr(e.note ? 'tempo limite' : 'interrompido') : msg`falhou (código ${e.exitCode ?? '—'})`}${e.durationMs !== undefined ? ` · ${(e.durationMs / 1000).toFixed(1)}s` : ''}`;
+ function entryOutput(e: LogEntry, pre: HTMLElement) {
+  if (e.state === 'running') { pre.textContent = e.output; return; }
+  pre.replaceChildren(...linkify(e.output).map(part => {
+   if (!part.path) return document.createTextNode(part.text);
+   const a = document.createElement('a'); a.href = '#'; a.textContent = part.text; a.title = msg`Abrir ${part.path}`;
+   a.onclick = event => { event.preventDefault(); void host.open(part.path!).catch(() => {}); }; return a;
+  }));
+ }
+ function renderEntry(e: LogEntry) {
+  let item = logList.querySelector<HTMLElement>(`[data-entry="${e.id}"]`);
+  if (!item) {
+   item = document.createElement('div'); item.className = 'composer-log-entry'; item.dataset.entry = e.id;
+   item.innerHTML = '<div class="composer-log-head"><button class="composer-log-rerun" type="button">▶</button><span class="composer-log-command"></span><button class="composer-log-fold" type="button"></button><small class="composer-log-state"></small></div><pre class="composer-log-output"></pre>';
+   (item.querySelector('.composer-log-rerun') as HTMLButtonElement).onclick = () => void run(e.request, 'log');
+   (item.querySelector('.composer-log-fold') as HTMLButtonElement).onclick = () => { log.toggle(e.id); renderEntry(e); };
+   logList.querySelector('.composer-empty')?.remove(); logList.append(item);
+  }
+  item.dataset.state = e.state; item.dataset.folded = String(e.folded);
+  const rerun = item.querySelector('.composer-log-rerun') as HTMLButtonElement; rerun.disabled = !!running; rerun.title = msg`Executar novamente: composer ${e.command}`; rerun.setAttribute('aria-label', rerun.title);
+  item.querySelector('.composer-log-command')!.textContent = e.command;
+  const fold = item.querySelector('.composer-log-fold') as HTMLButtonElement; fold.hidden = e.state === 'running' || !e.output;
+  fold.textContent = e.folded ? '…' : '▾'; fold.title = e.folded ? foldPreview(e) || tr('Sem saída') : tr('Dobrar a saída'); fold.setAttribute('aria-expanded', String(!e.folded));
+  item.querySelector('.composer-log-state')!.textContent = stateText(e);
+  const pre = item.querySelector('.composer-log-output') as HTMLElement; pre.hidden = e.folded; if (!e.folded) entryOutput(e, pre);
+ }
+ function renderLog() {
+  for (const item of [...logList.querySelectorAll<HTMLElement>('[data-entry]')]) if (!log.get(item.dataset.entry!)) item.remove();
+  for (const e of log.entries) renderEntry(e);
+  if (!log.entries.length) logList.replaceChildren(Object.assign(document.createElement('p'), { className: 'composer-empty', textContent: tr('Nenhum comando executado nesta sessão.') }));
+ }
+ function showLog() { logButton.hidden = false; openLog(); renderLog(); logList.scrollTop = logList.scrollHeight; }
+ function hideLog() { logPanel.hidden = true; logButton.setAttribute('aria-pressed', 'false'); }
+ logButton.onclick = () => logPanel.hidden ? showLog() : hideLog();
+ (logPanel.querySelector('#composer-log-hide') as HTMLElement).onclick = hideLog;
+ (logPanel.querySelector('#composer-log-clear') as HTMLElement).onclick = () => { log.clear(); renderLog(); };
+ el('composer-show-log').onclick = showLog;
  let running: string | undefined; let last: Request | undefined; let buffer = ''; let epoch = 0; let rows: Row[] = [];
  const output = el('composer-output');
  const summary = (text: string, state = '') => { el('composer-summary').textContent = text; el('composer-summary').dataset.state = state; };
  own(api.onComposerProgress(event => {
   if (event.id !== running) return;
-  const follow = output.scrollTop + output.clientHeight >= output.scrollHeight - 8;
-  buffer = (buffer + event.text).slice(-200000); output.textContent = buffer;
-  if (follow) output.scrollTop = output.scrollHeight;
+  const entry = log.append(event.id, event.text); if (!entry || logPanel.hidden) return;
+  const follow = logList.scrollTop + logList.clientHeight >= logList.scrollHeight - 8;
+  renderEntry(entry); if (follow) logList.scrollTop = logList.scrollHeight;
  }));
 
  function runner(): ComposerRunner { try { const saved = JSON.parse(localStorage.getItem(storage) ?? 'null'); if (saved?.mode) return saved; } catch { /* preferência inválida: padrão */ } return { mode: 'auto' }; }
@@ -103,15 +153,18 @@ function mountComposer(api: IdeApi, host: Host) {
   if ([...select.options].some(o => o.value === previous)) select.value = previous;
   controls();
  }
- async function run(request: Request) {
-  open(); last = request;
-  if (running) { summary(tr('O Composer já está em execução. Interrompa-o antes de iniciar outra ação.'), 'error'); return; }
-  const id = crypto.randomUUID(); const token = ++epoch; running = id; buffer = ''; output.textContent = ''; controls();
+ /** `reveal`: execuções do editor (gutter, ⌥Enter, CodeLens, ▶ do log) abrem o Composer Log; as da janela Composer ficam nela. */
+ async function run(request: Request, reveal: 'log' | 'window' = 'window') {
+  last = request;
+  if (running) { if (reveal === 'window') open(); else showLog(); summary(tr('O Composer já está em execução. Interrompa-o antes de iniciar outra ação.'), 'error'); host.status(el('composer-summary').textContent!); return; }
+  const id = crypto.randomUUID(); const token = ++epoch; running = id; controls();
+  log.start(id, logCommand('', request), request); logButton.hidden = false;
+  if (reveal === 'log') showLog(); else { open(); if (!logPanel.hidden) renderLog(); }
   summary(msg`Executando ${describe(request)}…`, 'running');
   try {
    const out: ComposerRunOutput = await api.composerRun(id, runner(), request);
    if (token !== epoch) return;
-   buffer = out.output ? `$ ${out.command}\n${out.output}` : buffer; output.textContent = buffer; output.scrollTop = output.scrollHeight;
+   log.finish(id, out);
    const seconds = (out.durationMs / 1000).toFixed(1);
    if (out.cancelled) summary(msg`${describe(request)} interrompido após ${seconds}s. Alterações parciais em vendor/composer.lock podem ter ficado; rode novamente.`, 'error');
    else if (out.timedOut) summary(tr('Tempo limite de 30 minutos atingido; o processo foi encerrado.'), 'error');
@@ -121,12 +174,13 @@ function mountComposer(api: IdeApi, host: Host) {
   } catch (error) {
    if (token !== epoch) return;
    const text = String((error as Error)?.message ?? error);
+   log.finish(id, { error: text });
    // Composer ausente ou caminho errado: abre a configuração do executável na hora.
    if (/não encontrado|not found|Docker CLI|curl/i.test(text) && !/composer\.json/.test(text)) { summary(text, 'missing'); showConfig(true); }
    else summary(msg`${text} · Corrija e tente novamente.`, 'error');
    host.status(tr('Falha ao executar o Composer'));
   } finally {
-   if (token === epoch) { running = undefined; controls(); await load(); host.changed(); insights.afterRun(request); }
+   if (token === epoch) { running = undefined; controls(); renderLog(); await load(); host.changed(); insights.afterRun(request); }
   }
  }
  panel.querySelectorAll<HTMLButtonElement>('[data-composer]').forEach(b => b.onclick = () => void run({ action: b.dataset.composer as Request['action'], ...(b.dataset.composer === 'dump-autoload' ? { optimize: true } : {}) }));
@@ -174,7 +228,7 @@ function mountComposer(api: IdeApi, host: Host) {
 
  // Atualizações, audit e outdated: consultas sem gravar nada, fora da fila exclusiva do Composer.
  let checkState: { running: CheckKind[]; errors: Partial<Record<CheckKind, string>> } = { running: [], errors: {} };
- const insights = mountEditorInsights({ monaco, editor: host.editor, api, keymap, own, tr, run: request => run(request), runner, enabled: checks, busy: () => !!running,
+ const insights = mountEditorInsights({ monaco, editor: host.editor, api, keymap, own, tr, run: request => run(request, 'log'), runner, enabled: checks, busy: () => !!running,
   changed: (_value: Insights, state) => { checkState = state; renderInsights(); if (!panel.hidden) void load(); } });
  function rowBadges(name: string) {
   const out: HTMLElement[] = []; const lower = name.toLowerCase(); const v = insights.insights;
@@ -227,10 +281,12 @@ function mountComposer(api: IdeApi, host: Host) {
  composerAction('composer.dumpAutoload', 'Composer: dump-autoload', '[data-composer="dump-autoload"]', 'dump autoload');
  composerAction('composer.validate', 'Composer: validate', '[data-composer="validate"]', 'validate validar');
  composerAction('composer.require', 'Composer: adicionar pacote (require)', '#composer-require', 'require adicionar pacote package');
+ keymap.registerAction({ id: 'composer.showLog', label: 'Composer: mostrar log', category: 'Composer', aliases: 'composer log saída output show log', defaults: {}, run: showLog });
  const changed = (event:Event) => { if (!panel.hidden && !running && /(^|\/)composer\.(json|lock)$/.test(String((event as CustomEvent).detail?.path ?? ''))) void load(); }; window.addEventListener('ide-workspace-file-changed',changed); own(()=>window.removeEventListener('ide-workspace-file-changed',changed));
  return {
-  run: (request: Request) => { void load(); return run(request); },
-  reset() { insights.reset(); const id = running; epoch++; running = undefined; last = undefined; buffer = ''; output.textContent = ''; rows = []; if (id) void api.composerCancel(id).catch(() => {}); summary(tr('Use as ações acima ou o ▶ no composer.json.')); hide(); controls(); },
+  /** CodeLens do composer.json: `{ show: 'log' }` abre o log ("Show log" do PhpStorm); o resto executa. */
+  run: (request: Request | { show: 'log' }) => { if ('show' in request) { showLog(); return Promise.resolve(); } void load(); return run(request, 'log'); },
+  reset() { insights.reset(); const id = running; epoch++; running = undefined; last = undefined; buffer = ''; output.textContent = ''; log.entries = []; renderLog(); hideLog(); logButton.hidden = true; rows = []; if (id) void api.composerCancel(id).catch(() => {}); summary(tr('Use as ações acima ou o ▶ no composer.json.')); hide(); controls(); },
  };
 }
 return mountComposer(sdk.api,sdk.host);
