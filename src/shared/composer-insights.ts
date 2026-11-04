@@ -57,6 +57,40 @@ export function auditProblems(text: string, audit?: AuditResult): Problem[] {
  return out;
 }
 
+/** Ação do ⌥Enter: `request` roda no Composer; `preferred` vira a primeira da lista. */
+export type QuickFix = { title: string; request: ComposerRequest; kind: 'quickfix' | 'refactor'; codes?: string[]; preferred?: boolean };
+/**
+ * Ações disponíveis em `offset`. `markers` são os códigos dos diagnósticos sob o cursor
+ * (do plugin de linguagem: `composer.not-installed`, `composer.package-not-locked`, `composer.lock-outdated`).
+ */
+export function quickFixes(text: string, offset: number, markers: string[], insights: Insights = {}): QuickFix[] {
+ const out: QuickFix[] = [];
+ const has = (code: string) => markers.filter(m => m === code || m.endsWith('/' + code));
+ const dep = dependencies(text).find(d => offset >= d.keyStart && offset <= d.keyEnd);
+ const platform = (name: string) => !name.includes('/');
+ if (dep && !platform(dep.name)) {
+  const missing = [...has('composer.not-installed'), ...has('composer.package-not-locked')];
+  if (missing.length) {
+   out.push({ title: `Instalar ${dep.name}`, request: { action: 'update', packages: [dep.name] }, kind: 'quickfix', codes: missing, preferred: true });
+   out.push({ title: has('composer.not-installed').length ? 'Instalar todos os pacotes (composer install)' : 'Instalar todos os pacotes (composer update)', request: { action: has('composer.not-installed').length ? 'install' : 'update' }, kind: 'quickfix', codes: missing });
+  }
+  const vulnerable = has('composer.vulnerable');
+  const hint = (insights.updates ?? []).find(u => same(u.name, dep.name) && !u.downgrade);
+  if (vulnerable.length) out.push({ title: hint ? `Atualizar ${dep.name} para ${hint.to} (corrige avisos de segurança)` : `Atualizar ${dep.name} (avisos de segurança)`, request: { action: 'update', packages: [dep.name] }, kind: 'quickfix', codes: vulnerable, preferred: !missing.length });
+  else if (hint) out.push({ title: `Atualizar ${dep.name} para ${hint.to}`, request: { action: 'update', packages: [dep.name] }, kind: 'quickfix', preferred: !missing.length });
+  if (hint && (insights.updates?.length ?? 0) > 1) out.push({ title: 'Atualizar todos os pacotes', request: { action: 'update' }, kind: 'quickfix' });
+  out.push({ title: `Mostrar por que ${dep.name} está instalado (composer why)`, request: { action: 'why', packages: [dep.name] }, kind: 'refactor' });
+ }
+ const lock = has('composer.lock-outdated');
+ if (lock.length) {
+  out.push({ title: 'Atualizar o hash do composer.lock (composer update --lock)', request: { action: 'update', lock: true }, kind: 'quickfix', codes: lock, preferred: !out.some(f => f.preferred) });
+  out.push({ title: 'Atualizar dependências (composer update)', request: { action: 'update' }, kind: 'quickfix', codes: lock });
+ }
+ const script = scriptKeys(text).find(s => offset >= s.keyStart && offset <= s.keyEnd);
+ if (script) out.push({ title: `Executar '${script.name}'`, request: { action: 'run-script', script: script.name }, kind: 'refactor' });
+ return out;
+}
+
 /** Linha de resumo das consultas, mostrada na janela Composer. */
 export function insightSummary(insights: Insights): string {
  const parts: string[] = [];

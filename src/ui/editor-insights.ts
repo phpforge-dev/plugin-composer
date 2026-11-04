@@ -1,9 +1,9 @@
-import { auditProblems, updateHints, type AuditResult, type Insights, type OutdatedPackage, type PackageUpdate } from '../shared/composer-insights';
+import { auditProblems, quickFixes, updateHints, type AuditResult, type Insights, type OutdatedPackage, type PackageUpdate } from '../shared/composer-insights';
 import type { ComposerRequest } from '../shared/language/plugins/composer';
 
 // composer.json no editor: ícone "Update Package" no gutter para dependências diretas com versão
 // mais nova dentro da restrição (PhpStorm: `update --dry-run` ao abrir o projeto ou mudar o arquivo;
-// clique atualiza), e marcadores do `composer audit`.
+// clique atualiza), marcadores do `composer audit` e ações do ⌥Enter.
 
 export type CheckKind = 'updates' | 'audit' | 'outdated';
 type Options = {
@@ -80,6 +80,20 @@ export function mountEditorInsights(o: Options) {
  }));
  o.own(editor.onDidChangeModel(() => { render(); if (isComposerJson(editor.getModel())) schedule(300); }));
  o.own(monaco.editor.onDidCreateModel((model: any) => { if (isComposerJson(model)) schedule(300); }));
+
+ // ⌥Enter: correções dos diagnósticos (plugin de linguagem e audit) e intenções da linha.
+ o.own(monaco.editor.registerCommand('phpforge.composer.run', (_accessor: unknown, request: ComposerRequest) => { void o.run(request); }));
+ o.own(monaco.languages.registerCodeActionProvider('json', {
+  provideCodeActions(model: any, range: any, context: any) {
+   if (!isComposerJson(model)) return { actions: [], dispose() {} };
+   const code = (m: any) => String(typeof m.code === 'object' ? m.code?.value : m.code ?? '');
+   const markers = [...context.markers, ...monaco.editor.getModelMarkers({ resource: model.uri, owner: OWNER }).filter((m: any) => m.startLineNumber <= range.startLineNumber && m.endLineNumber >= range.startLineNumber)];
+   const fixes = quickFixes(model.getValue(), model.getOffsetAt(range.getStartPosition()), markers.map(code), insights);
+   return { actions: fixes.map(f => ({ title: f.title, kind: f.kind, isPreferred: !!f.preferred, diagnostics: markers.filter((m: any) => f.codes?.some(c => code(m) === c || code(m).endsWith('/' + c))), command: { id: 'phpforge.composer.run', title: f.title, arguments: [f.request] } })), dispose() {} };
+  },
+ }, { providedCodeActionKinds: ['quickfix', 'refactor'] }));
+ o.keymap.defineContext('composer-json', (el: Element | null) => !!el && editor.getContainerDomNode().contains(el) && isComposerJson(editor.getModel()));
+ o.keymap.registerAction({ id: 'composer.showIntentions', label: 'Composer: mostrar correções e ações', category: 'Composer', aliases: 'composer quick fix intention alt enter', context: 'composer-json', defaults: { mac: 'Alt+Enter', other: 'Alt+Enter' }, run: () => editor.trigger('keyboard', 'editor.action.quickFix', {}) });
 
  const changed = (event: Event) => { if (/(^|\/)composer\.(json|lock)$/.test(String((event as CustomEvent).detail?.path ?? ''))) schedule(); };
  window.addEventListener('ide-workspace-file-changed', changed); o.own(() => window.removeEventListener('ide-workspace-file-changed', changed));
