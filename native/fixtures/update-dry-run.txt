@@ -1,0 +1,15 @@
+Loading composer repositories with package information
+Updating dependencies
+Lock file operations: 0 installs, 5 updates, 0 removals
+  - Upgrading guzzlehttp/guzzle (7.4.0 => 7.16.1)
+  - Upgrading guzzlehttp/promises (1.5.3 => 2.6.0)
+  - Upgrading psr/log (1.1.0 => 3.0.2)
+  - Upgrading symfony/deprecation-contracts (v2.5.4 => v3.7.1)
+  - Upgrading symfony/var-dumper (v6.0.0 => v6.4.49)
+Installing dependencies from lock file (including require-dev)
+Package operations: 0 installs, 5 updates, 0 removals
+  - Upgrading symfony/deprecation-contracts (v2.5.4 => v3.7.1)
+  - Upgrading guzzlehttp/promises (1.5.3 => 2.6.0)
+  - Upgrading guzzlehttp/guzzle (7.4.0 => 7.16.1)
+  - Upgrading psr/log (1.1.0 => 3.0.2)
+  - Upgrading symfony/var-dumper (v6.0.0 => v6.4.49)

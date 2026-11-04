@@ -16,6 +16,7 @@ use tokio::{io::AsyncReadExt, process::Command, sync::oneshot};
 
 const OUTPUT_LIMIT: usize = 512 * 1024;
 const TIMEOUT: Duration = Duration::from_secs(1800);
+const CHECK_TIMEOUT: Duration = Duration::from_secs(300);
 
 #[derive(Default)]
 pub struct Composer {
@@ -309,6 +310,125 @@ async fn fetch(url: &str) -> Res<String> {
     String::from_utf8(out.stdout).map_err(err)
 }
 
+/// Consultas em segundo plano (sem o bloqueio exclusivo de `composerRun`): nada é gravado.
+/// `updates` usa `update --dry-run`, como a verificação de atualizações do PhpStorm documenta.
+pub fn check_args(kind: &str) -> Res<Vec<String>> {
+    let list: &[&str] = match kind {
+        "updates" => &["update", "--dry-run", "--no-scripts", "--no-audit", "--no-progress"],
+        "audit" => &["audit", "--format=json", "--locked"],
+        "outdated" => &["outdated", "--direct", "--format=json", "--locked"],
+        _ => return Err("Consulta do Composer desconhecida".into()),
+    };
+    Ok(list.iter().map(|s| s.to_string()).chain(["--no-interaction".into(), "--no-ansi".into()]).collect())
+}
+
+/// `  - Upgrading vendor/pkg (1.0 => 1.1)` da seção de lock; repetições da instalação são ignoradas.
+pub fn parse_updates(text: &str) -> Value {
+    let line = regex::Regex::new(r"^\s*- (Upgrading|Downgrading) (\S+) \((\S+) => (\S+)\)").unwrap();
+    let mut seen = std::collections::HashSet::new();
+    Value::Array(
+        text.lines()
+            .filter_map(|l| line.captures(l))
+            .filter(|c| seen.insert(c[2].to_lowercase()))
+            .map(|c| json!({"name": &c[2], "from": &c[3], "to": &c[4], "downgrade": &c[1] == "Downgrading"}))
+            .collect(),
+    )
+}
+
+fn json_body(text: &str) -> Res<Value> {
+    let start = text.find('{').ok_or("Resposta do Composer sem JSON")?;
+    serde_json::from_str(&text[start..]).map_err(|e| format!("Resposta inesperada do Composer: {e}"))
+}
+
+/// `audit --format=json`: avisos por pacote e pacotes abandonados (objeto, ou `[]` quando vazio).
+pub fn parse_audit(text: &str) -> Res<Value> {
+    let data = json_body(text)?;
+    let mut advisories = vec![];
+    if let Some(map) = data["advisories"].as_object() {
+        for (name, list) in map {
+            // Composer serializa a lista como objeto quando os índices não são sequenciais.
+            let items: Vec<&Value> = match list {
+                Value::Array(a) => a.iter().collect(),
+                Value::Object(o) => o.values().collect(),
+                _ => vec![],
+            };
+            for a in items {
+                advisories.push(json!({
+                    "name": a["packageName"].as_str().unwrap_or(name),
+                    "id": a["advisoryId"].as_str().unwrap_or(""),
+                    "title": a["title"].as_str().unwrap_or(""),
+                    "cve": a["cve"].as_str(),
+                    "link": a["link"].as_str(),
+                    "affected": a["affectedVersions"].as_str().unwrap_or(""),
+                    "severity": a["severity"].as_str(),
+                }));
+            }
+        }
+    }
+    let abandoned: Vec<Value> = data["abandoned"]
+        .as_object()
+        .map(|o| o.iter().map(|(name, r)| json!({"name": name, "replacement": r.as_str()})).collect())
+        .unwrap_or_default();
+    Ok(json!({"advisories": advisories, "abandoned": abandoned}))
+}
+
+/// `outdated --direct --format=json --locked`: versão travada, mais recente e se cabe na restrição.
+pub fn parse_outdated(text: &str) -> Res<Value> {
+    let data = json_body(text)?;
+    let list = data["locked"].as_array().or(data["installed"].as_array()).cloned().unwrap_or_default();
+    Ok(Value::Array(
+        list.iter()
+            .filter_map(|p| {
+                Some(json!({
+                    "name": p["name"].as_str()?,
+                    "version": p["version"].as_str().unwrap_or(""),
+                    "latest": p["latest"].as_str().unwrap_or(""),
+                    "status": p["latest-status"].as_str().unwrap_or(""),
+                    "description": p["description"].as_str().unwrap_or(""),
+                    "abandoned": !p["abandoned"].is_null() && p["abandoned"] != false,
+                }))
+            })
+            .collect(),
+    ))
+}
+
+pub async fn check(root: &Path, program: &str, prefix: &[String], kind: &str) -> Res<Value> {
+    let mut args = prefix.to_vec();
+    args.extend(check_args(kind)?);
+    if !root.join("composer.json").is_file() {
+        return Err("composer.json não encontrado na raiz do projeto".into());
+    }
+    if kind != "updates" && !root.join("composer.lock").is_file() {
+        return Err("composer.lock não encontrado: rode composer install ou update primeiro".into());
+    }
+    let command = display(program, &args);
+    let output = Command::new(program)
+        .args(&args)
+        .current_dir(root)
+        .env("COMPOSER_NO_INTERACTION", "1")
+        .env("NO_COLOR", "1")
+        .stdin(Stdio::null())
+        .kill_on_drop(true)
+        .output();
+    let out = tokio::time::timeout(CHECK_TIMEOUT, output)
+        .await
+        .map_err(|_| format!("{command}: sem resposta em {} s", CHECK_TIMEOUT.as_secs()))?
+        .map_err(|e| format!("Composer não encontrado: não foi possível iniciar {program} ({e}). Corrija o caminho do executável."))?;
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    let fail = || format!("{command} falhou (código {}): {}", out.status.code().map_or("—".into(), |c| c.to_string()), (stderr.clone() + &stdout).trim().chars().take(1500).collect::<String>());
+    let result = match kind {
+        // A saída do dry-run vai para stderr no Composer 2.
+        "updates" if out.status.success() => parse_updates(&(stdout.clone() + "\n" + &stderr)),
+        "updates" => return Err(fail()),
+        // audit sai com 1 (vulnerável) e 2 (abandonado): o JSON vale mesmo assim.
+        "audit" => parse_audit(&stdout).map_err(|_| fail())?,
+        _ if out.status.success() => parse_outdated(&stdout).map_err(|_| fail())?,
+        _ => return Err(fail()),
+    };
+    Ok(json!({"kind": kind, "command": command, "exitCode": out.status.code(), "result": result}))
+}
+
 fn run_id(id: &str) -> Res<()> {
     if id.is_empty() || id.len() > 64 || !id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
         return Err("Identificador de execução inválido".into());
@@ -358,6 +478,10 @@ impl Composer {
                 }
                 let version = text.lines().find(|l| l.contains("Composer")).unwrap_or(text.trim()).trim().to_owned();
                 Ok(json!({"command": command, "version": version}))
+            }
+            "composerCheck" => {
+                let (program, prefix) = resolve(root, &runner(args.get(1).unwrap_or(&Value::Null))?, docker)?;
+                check(root, &program, &prefix, s(0)).await
             }
             "composerSearch" => parse_search(&fetch(search_url(s(0))?.as_str()).await?),
             "composerVersions" => parse_versions(&fetch(&versions_url(s(0))?).await?, s(0)),
@@ -557,5 +681,52 @@ mod test {
         }
         let out = tokio::time::timeout(Duration::from_secs(10), job).await.unwrap().unwrap().unwrap();
         assert_eq!(out["cancelled"], true);
+    }
+
+    #[test]
+    fn consultas_de_atualizacao_audit_e_outdated() {
+        assert_eq!(check_args("updates").unwrap()[..2], ["update", "--dry-run"]);
+        assert!(check_args("audit").unwrap().contains(&"--locked".to_owned()));
+        assert!(check_args("x").is_err());
+        let updates = parse_updates(include_str!("../fixtures/update-dry-run.txt"));
+        assert_eq!(updates.as_array().unwrap().len(), 5, "operações de instalação repetidas são ignoradas");
+        assert_eq!(updates[0], json!({"name":"guzzlehttp/guzzle","from":"7.4.0","to":"7.16.1","downgrade":false}));
+        let audit = parse_audit(&format!("aviso antes do JSON\n{}", include_str!("../fixtures/audit.json"))).unwrap();
+        assert_eq!(audit["advisories"].as_array().unwrap().len(), 2);
+        assert_eq!(audit["advisories"][0]["name"], "guzzlehttp/guzzle");
+        assert_eq!(audit["advisories"][0]["severity"], "high");
+        assert!(audit["advisories"][0]["cve"].as_str().unwrap().starts_with("CVE-"));
+        assert_eq!(audit["abandoned"], json!([{"name":"fixture/gone","replacement":null},{"name":"fixture/old","replacement":"fixture/new"}]));
+        let empty = parse_audit(r#"{"advisories":[],"abandoned":[]}"#).unwrap();
+        assert_eq!(empty, json!({"advisories":[],"abandoned":[]}));
+        let indexed = parse_audit(r#"{"advisories":{"a/b":{"3":{"advisoryId":"X","title":"t","affectedVersions":"<2"}}}}"#).unwrap();
+        assert_eq!(indexed["advisories"][0]["name"], "a/b");
+        let outdated = parse_outdated(include_str!("../fixtures/outdated.json")).unwrap();
+        assert_eq!(outdated[0], json!({"name":"guzzlehttp/guzzle","version":"7.4.0","latest":"8.3.1","status":"update-possible","description":"Guzzle is a PHP HTTP client library","abandoned":false}));
+        assert!(parse_outdated("sem json").is_err());
+    }
+
+    /// Composer falso: audit sai com 1 e o JSON ainda é lido; updates exige sucesso; sem lock há erro claro.
+    #[tokio::test]
+    async fn consulta_em_segundo_plano_com_composer_falso() {
+        if std::process::Command::new(php()).arg("-v").output().is_err() {
+            eprintln!("PHP indisponível; teste ignorado");
+            return;
+        }
+        let (_dir, root) = project("");
+        let fake = root.join("composer.phar");
+        std::fs::write(&fake, format!("<?php\n$a = $argv[1] ?? '';\nif ($a === 'audit') {{ echo {audit:?}; exit(1); }}\nif ($a === 'update') {{ fwrite(STDERR, {dry:?}); exit(in_array('--dry-run', $argv) ? 0 : 9); }}\nif ($a === 'outdated') {{ fwrite(STDERR, 'rede indisponível'); exit(1); }}\n",
+            audit = include_str!("../fixtures/audit.json"), dry = include_str!("../fixtures/update-dry-run.txt"))).unwrap();
+        let (program, prefix) = resolve(&root, &runner(&json!({"mode":"path","path":fake})).unwrap(), "docker").unwrap();
+        assert!(check(&root, &program, &prefix, "audit").await.unwrap_err().contains("composer.lock"));
+        std::fs::write(root.join("composer.lock"), "{}").unwrap();
+        let audit = check(&root, &program, &prefix, "audit").await.unwrap();
+        assert_eq!(audit["exitCode"], 1);
+        assert_eq!(audit["result"]["advisories"].as_array().unwrap().len(), 2);
+        let updates = check(&root, &program, &prefix, "updates").await.unwrap();
+        assert_eq!(updates["result"][2]["name"], "psr/log");
+        assert!(updates["command"].as_str().unwrap().contains("update --dry-run"));
+        let failed = check(&root, &program, &prefix, "outdated").await.unwrap_err();
+        assert!(failed.contains("rede indisponível") && failed.contains("código 1"), "{failed}");
     }
 }

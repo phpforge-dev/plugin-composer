@@ -1,0 +1,46 @@
+{
+    "locked": [
+        {
+            "name": "guzzlehttp/guzzle",
+            "direct-dependency": true,
+            "homepage": null,
+            "source": "https://github.com/guzzle/guzzle/tree/7.4.0",
+            "version": "7.4.0",
+            "release-age": "5 years old",
+            "release-date": "2021-10-18T09:52:00+00:00",
+            "latest": "8.3.1",
+            "latest-release-date": "2026-10-25T21:35:34+00:00",
+            "latest-status": "update-possible",
+            "description": "Guzzle is a PHP HTTP client library",
+            "abandoned": false
+        },
+        {
+            "name": "psr/log",
+            "direct-dependency": true,
+            "homepage": "https://github.com/php-fig/log",
+            "source": "https://github.com/php-fig/log/tree/master",
+            "version": "1.1.0",
+            "release-age": "7 years old",
+            "release-date": "2018-11-20T15:27:04+00:00",
+            "latest": "3.0.2",
+            "latest-release-date": "2024-09-11T13:17:53+00:00",
+            "latest-status": "update-possible",
+            "description": "Common interface for logging libraries",
+            "abandoned": false
+        },
+        {
+            "name": "symfony/var-dumper",
+            "direct-dependency": true,
+            "homepage": "https://symfony.com",
+            "source": "https://github.com/symfony/var-dumper/tree/v6.0.0",
+            "version": "v6.0.0",
+            "release-age": "4 years old",
+            "release-date": "2021-11-29T15:32:57+00:00",
+            "latest": "v7.4.22",
+            "latest-release-date": "2026-10-25T21:04:04+00:00",
+            "latest-status": "update-possible",
+            "description": "Provides mechanisms for walking through any arbitrary PHP variable",
+            "abandoned": false
+        }
+    ]
+}

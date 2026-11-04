@@ -338,7 +338,7 @@ export class ComposerPlugin implements IdePlugin {
 }
 
 /** Pedido do CodeLens/painel para o backend (`composerRun`). */
-export type ComposerRequest = { action: 'install' | 'update' | 'require' | 'remove' | 'dump-autoload' | 'run-script' | 'validate'; packages?: string[]; dev?: boolean; script?: string; optimize?: boolean };
+export type ComposerRequest = { action: 'install' | 'update' | 'require' | 'remove' | 'dump-autoload' | 'run-script' | 'validate' | 'why' | 'why-not'; packages?: string[]; dev?: boolean; script?: string; optimize?: boolean; lock?: boolean };
 function scriptEntries(text: string) {
  try { const node = member(parseJson(text), 'scripts')?.value; return node?.type === 'object' ? node.entries.map(e => ({ name: e.key, keyStart: e.keyStart, keyEnd: e.keyEnd })) : []; } catch { return []; }
 }

@@ -23,6 +23,7 @@
       "composerRun",
       "composerCancel",
       "composerProbe",
+      "composerCheck",
       "composerSearch",
       "composerVersions"
     ],
