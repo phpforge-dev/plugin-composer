@@ -1,8 +1,8 @@
 {
   "id": "phpforge.composer",
   "name": "Composer",
-  "version": "1.0.0",
-  "minIdeVersion": "0.2.11",
+  "version": "1.1.0",
+  "minIdeVersion": "0.2.19",
   "description": "Composer: separate Rust tool service and workbench integration.",
   "main": "main.js",
   "activation": {
