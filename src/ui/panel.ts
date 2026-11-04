@@ -1,4 +1,6 @@
 import { scriptNames, type ComposerRequest } from '../shared/language/plugins/composer';
+import { insightSummary, type Insights } from '../shared/composer-insights';
+import { mountEditorInsights, type CheckKind } from './editor-insights';
 export function activate(sdk:any){
 const {monaco,listen,tr,msg,html,keymap,dockWindow,resizeToolWindow,toolIcon,own}=sdk;
 
@@ -6,6 +8,9 @@ type Host = { status(text: string): void; open(path: string): Promise<void>; cha
 type Request = ComposerRequest & { lock?: boolean };
 type Row = { name: string; constraint: string; dev: boolean; installed?: string };
 const storage = 'php-ide-composer-runner';
+const checksKey = 'php-ide-composer-checks';
+/** Consultas automáticas (padrão ligado, como "Check for available package updates" do PhpStorm). */
+function checks(): { updates: boolean; audit: boolean } { try { const v = JSON.parse(localStorage.getItem(checksKey) ?? 'null'); if (v) return { updates: v.updates !== false, audit: v.audit !== false }; } catch { /* padrão */ } return { updates: true, audit: true }; }
 const describe = (r: Request) => ['composer', r.action, r.dev ? '--dev' : '', r.lock ? '--lock' : '', r.optimize ? '--optimize' : '', r.script ?? '', ...(r.packages ?? [])].filter(Boolean).join(' ');
 
 /** Janela Composer: ações com saída em tempo real, pacotes do projeto, busca no Packagist e executável configurável. */
@@ -13,13 +18,14 @@ function mountComposer(api: IdeApi, host: Host) {
  const panel = document.createElement('section'); panel.id = 'composer-panel'; panel.hidden = true;
  panel.innerHTML = html`<div id="composer-resize" class="tool-window-resize" role="separator" tabindex="0" aria-label="Altura do Composer" aria-orientation="horizontal"></div>
 <div class="composer-toolbar"><strong>Composer</strong><span id="composer-runner-label"></span>
-<button data-composer="install" title="Instalar as versões do composer.lock">Install</button><button data-composer="update" title="Atualizar todas as dependências">Update</button><button id="composer-require" title="Buscar no Packagist e adicionar dependência">Require…</button><button data-composer="dump-autoload" title="Regenerar o autoload otimizado">Dump autoload</button><button data-composer="validate" title="Validar composer.json e composer.lock">Validate</button>
+<button data-composer="install" title="Instalar as versões do composer.lock">Install</button><button data-composer="update" title="Atualizar todas as dependências">Update</button><button id="composer-require" title="Buscar no Packagist e adicionar dependência">Require…</button><button data-composer="dump-autoload" title="Regenerar o autoload otimizado">Dump autoload</button><button data-composer="validate" title="Validar composer.json e composer.lock">Validate</button><button data-check="outdated" title="Dependências diretas com versões mais novas (composer outdated --direct)">Outdated</button><button data-check="audit" title="Avisos de segurança e pacotes abandonados no composer.lock (composer audit)">Audit</button>
 <select id="composer-script" aria-label="Script do composer.json"></select><button id="composer-run-script" title="Executar script">▶</button>
 <button id="composer-stop" disabled>■ Interromper</button><button id="composer-settings" aria-expanded="false" title="Executável do Composer">⚙</button><button id="composer-hide" aria-label="Ocultar Composer">−</button></div>
 <form id="composer-config" hidden><label>Executar com <select id="composer-mode"><option value="auto">PATH ou composer.phar do projeto</option><option value="path">Caminho do executável</option><option value="docker">Docker (imagem oficial)</option></select></label>
 <label id="composer-path-field">Caminho <input id="composer-path" placeholder="/usr/local/bin/composer ou …/composer.phar" spellcheck="false"></label><label id="composer-image-field">Imagem <input id="composer-image" placeholder="composer:2" spellcheck="false"></label>
+<label><input id="composer-check-updates" type="checkbox"> Verificar atualizações de pacotes</label><label><input id="composer-check-audit" type="checkbox"> Auditar segurança (composer audit)</label>
 <button id="composer-probe" type="submit">Salvar e testar</button><span id="composer-probe-result" role="status"></span></form>
-<p id="composer-summary" role="status" aria-live="polite">Use as ações acima ou o ▶ no composer.json.</p>
+<p id="composer-summary" role="status" aria-live="polite">Use as ações acima ou o ▶ no composer.json.</p><p id="composer-insights" role="status"></p>
 <div class="composer-layout"><div id="composer-packages" role="list" aria-label="Dependências"></div><pre id="composer-output" tabindex="0" aria-label="Saída do Composer"></pre></div>
 <dialog id="composer-dialog" class="composer-dialog"><form method="dialog"><h2>Adicionar dependência</h2><input id="composer-query" type="search" placeholder="Buscar no Packagist (ex.: monolog)" autocomplete="off" spellcheck="false" aria-label="Pacote"><div id="composer-results" role="listbox" aria-label="Resultados do Packagist"></div><p id="composer-search-state" role="status"></p>
 <div class="composer-dialog-row"><label>Versão <input id="composer-constraint" list="composer-versions" placeholder="vazio = mais recente estável" spellcheck="false"></label><datalist id="composer-versions"></datalist><label><input id="composer-dev" type="checkbox"> require-dev</label></div>
@@ -45,6 +51,7 @@ function mountComposer(api: IdeApi, host: Host) {
  function runnerLabel() { const r = runner(); el('composer-runner-label').textContent = r.mode === 'docker' ? `Docker · ${r.image || 'composer:2'}` : r.mode === 'path' ? r.path?.split('/').pop() ?? '' : tr('PATH'); }
  function showConfig(show = el('composer-config').hidden) {
   el('composer-config').hidden = !show; el('composer-settings').setAttribute('aria-expanded', String(show));
+  const c = checks(); el<HTMLInputElement>('composer-check-updates').checked = c.updates; el<HTMLInputElement>('composer-check-audit').checked = c.audit;
   const r = runner(); el<HTMLSelectElement>('composer-mode').value = r.mode; el<HTMLInputElement>('composer-path').value = r.path ?? ''; el<HTMLInputElement>('composer-image').value = r.image ?? '';
   fields(); if (show) el<HTMLSelectElement>('composer-mode').focus();
  }
@@ -55,6 +62,7 @@ function mountComposer(api: IdeApi, host: Host) {
   event.preventDefault();
   const mode = el<HTMLSelectElement>('composer-mode').value as ComposerRunner['mode'];
   const next: ComposerRunner = { mode, ...(mode === 'path' ? { path: el<HTMLInputElement>('composer-path').value.trim() } : {}), ...(mode === 'docker' ? { image: el<HTMLInputElement>('composer-image').value.trim() || 'composer:2' } : {}) };
+  try { localStorage.setItem(checksKey, JSON.stringify({ updates: el<HTMLInputElement>('composer-check-updates').checked, audit: el<HTMLInputElement>('composer-check-audit').checked })); } catch { /* sem armazenamento */ }
   const result = el('composer-probe-result'); result.dataset.state = 'running'; result.textContent = mode === 'docker' ? tr('Testando… (a primeira execução pode baixar a imagem)') : tr('Testando…');
   try { const probe = await api.composerProbe(next); try { localStorage.setItem(storage, JSON.stringify(next)); } catch { /* sem armazenamento: vale só nesta sessão */ } runnerLabel(); result.dataset.state = 'passed'; result.textContent = probe.version; if (last && el('composer-summary').dataset.state === 'missing') summary(msg`Composer configurado. Use “${describe(last)}” novamente.`); }
   catch (error) { result.dataset.state = 'error'; result.textContent = String((error as Error)?.message ?? error); }
@@ -83,7 +91,7 @@ function mountComposer(api: IdeApi, host: Host) {
    update.onclick = () => void run({ action: 'update', packages: [row.name] });
    const remove = document.createElement('button'); remove.type = 'button'; remove.textContent = '✕'; remove.title = msg`Remover ${row.name}`; remove.setAttribute('aria-label', remove.title);
    remove.onclick = () => { if (remove.dataset.confirm) { void run({ action: 'remove', packages: [row.name], dev: row.dev }); return; } remove.dataset.confirm = '1'; remove.textContent = tr('Remover?'); setTimeout(() => { delete remove.dataset.confirm; remove.textContent = '✕'; }, 4000); };
-   item.append(name, detail, update, remove); return item;
+   detail.append(...rowBadges(row.name)); item.append(name, detail, update, remove); return item;
   }));
   const select = el<HTMLSelectElement>('composer-script'); const previous = select.value;
   select.replaceChildren(new Option(tr('Scripts…'), ''), ...scriptNames(text).map(n => new Option(n, n)));
@@ -113,7 +121,7 @@ function mountComposer(api: IdeApi, host: Host) {
    else summary(msg`${text} · Corrija e tente novamente.`, 'error');
    host.status(tr('Falha ao executar o Composer'));
   } finally {
-   if (token === epoch) { running = undefined; controls(); await load(); host.changed(); }
+   if (token === epoch) { running = undefined; controls(); await load(); host.changed(); insights.afterRun(request); }
   }
  }
  panel.querySelectorAll<HTMLButtonElement>('[data-composer]').forEach(b => b.onclick = () => void run({ action: b.dataset.composer as Request['action'], ...(b.dataset.composer === 'dump-autoload' ? { optimize: true } : {}) }));
@@ -159,6 +167,37 @@ function mountComposer(api: IdeApi, host: Host) {
  el('composer-add').onclick = event => { event.preventDefault(); add(); };
  el('composer-require').onclick = () => { chosen = ''; el<HTMLInputElement>('composer-query').value = ''; el<HTMLInputElement>('composer-constraint').value = ''; el('composer-results').replaceChildren(); el('composer-search-state').textContent = ''; el<HTMLButtonElement>('composer-add').disabled = true; dialog.showModal(); el('composer-query').focus(); };
 
+ // Atualizações, audit e outdated: consultas sem gravar nada, fora da fila exclusiva do Composer.
+ let checkState: { running: CheckKind[]; errors: Partial<Record<CheckKind, string>> } = { running: [], errors: {} };
+ const insights = mountEditorInsights({ monaco, editor: host.editor, api, keymap, own, tr, run: request => run(request), runner, enabled: checks, busy: () => !!running,
+  changed: (_value: Insights, state) => { checkState = state; renderInsights(); if (!panel.hidden) void load(); } });
+ function rowBadges(name: string) {
+  const out: HTMLElement[] = []; const lower = name.toLowerCase(); const v = insights.insights;
+  const badge = (text: string, kind: string, title: string) => { const b = document.createElement('span'); b.className = 'composer-badge'; b.dataset.kind = kind; b.textContent = text; b.title = title; out.push(b); };
+  const update = v.updates?.find(u => u.name.toLowerCase() === lower && !u.downgrade); if (update) badge(`↑ ${update.to}`, 'update', msg`Atualização disponível dentro da restrição: ${update.from} → ${update.to}`);
+  const outdated = v.outdated?.find(u => u.name.toLowerCase() === lower); if (outdated && outdated.latest && outdated.latest !== update?.to) badge(msg`mais recente ${outdated.latest}`, outdated.status === 'semver-safe-update' ? 'update' : 'major', outdated.status === 'semver-safe-update' ? tr('Compatível com a restrição') : tr('Fora da restrição atual: exige mudar a versão no composer.json'));
+  const advisories = v.audit?.advisories.filter(a => a.name.toLowerCase() === lower) ?? []; if (advisories.length) badge(`⚠ ${advisories.length}`, 'vulnerable', advisories.map(a => `${a.cve || a.id}: ${a.title}`).join('\n'));
+  const abandoned = v.audit?.abandoned.find(a => a.name.toLowerCase() === lower); if (abandoned) badge(tr('abandonado'), 'abandoned', abandoned.replacement ? msg`Use ${abandoned.replacement}` : tr('Sem substituto indicado'));
+  return out;
+ }
+ function renderInsights() {
+  const line = el('composer-insights'); const errors = Object.entries(checkState.errors);
+  line.dataset.state = checkState.running.length ? 'running' : errors.length ? 'error' : '';
+  line.textContent = checkState.running.length ? msg`Consultando o Composer (${checkState.running.join(', ')})…` : [insightSummary(insights.insights), ...errors.map(([k, e]) => `${k}: ${e}`)].filter(Boolean).join(' · ');
+ }
+ /** Saída legível dos botões Outdated e Audit, no mesmo painel do log. */
+ function report(kind: CheckKind) {
+  const v = insights.insights; const lines: string[] = [];
+  if (kind === 'outdated') { lines.push(tr('composer outdated --direct')); for (const p of v.outdated ?? []) lines.push(`${p.name.padEnd(40)} ${p.version.padEnd(12)} → ${p.latest.padEnd(12)} ${p.status === 'semver-safe-update' ? tr('compatível') : tr('fora da restrição')}${p.abandoned ? tr(' · abandonado') : ''}`); if (!v.outdated?.length) lines.push(tr('Todas as dependências diretas estão na versão mais recente.')); }
+  else { lines.push(tr('composer audit')); for (const a of v.audit?.advisories ?? []) lines.push(`${a.name} · ${a.cve || a.id}${a.severity ? ` [${a.severity}]` : ''} · ${a.title}\n    ${tr('versões afetadas')}: ${a.affected}${a.link ? `\n    ${a.link}` : ''}`); for (const a of v.audit?.abandoned ?? []) lines.push(msg`${a.name} abandonado${a.replacement ? ` → ${a.replacement}` : ''}`); if (!v.audit?.advisories.length && !v.audit?.abandoned.length) lines.push(tr('Nenhum aviso de segurança encontrado no composer.lock.')); }
+  buffer = lines.join('\n') + '\n'; output.textContent = buffer;
+ }
+ panel.querySelectorAll<HTMLButtonElement>('[data-check]').forEach(b => b.onclick = async () => {
+  const kind = b.dataset.check as CheckKind; open(); b.disabled = true; summary(msg`Executando composer ${kind}…`, 'running');
+  try { await insights.check([kind]); const error = checkState.errors[kind]; if (error) summary(msg`${error} · Corrija e tente novamente.`, 'error'); else { report(kind); summary(insightSummary(insights.insights), 'passed'); } }
+  finally { b.disabled = false; }
+ });
+
  function hide() { panel.hidden = true; button.setAttribute('aria-pressed', 'false'); }
  function show() { open(); void load(); }
  button.onclick = () => panel.hidden ? show() : hide(); el('composer-hide').onclick = hide;
@@ -175,7 +214,7 @@ function mountComposer(api: IdeApi, host: Host) {
  const changed = (event:Event) => { if (!panel.hidden && !running && /(^|\/)composer\.(json|lock)$/.test(String((event as CustomEvent).detail?.path ?? ''))) void load(); }; window.addEventListener('ide-workspace-file-changed',changed); own(()=>window.removeEventListener('ide-workspace-file-changed',changed));
  return {
   run: (request: Request) => { void load(); return run(request); },
-  reset() { const id = running; epoch++; running = undefined; last = undefined; buffer = ''; output.textContent = ''; rows = []; if (id) void api.composerCancel(id).catch(() => {}); summary(tr('Use as ações acima ou o ▶ no composer.json.')); hide(); controls(); },
+  reset() { insights.reset(); const id = running; epoch++; running = undefined; last = undefined; buffer = ''; output.textContent = ''; rows = []; if (id) void api.composerCancel(id).catch(() => {}); summary(tr('Use as ações acima ou o ▶ no composer.json.')); hide(); controls(); },
  };
 }
 return mountComposer(sdk.api,sdk.host);
