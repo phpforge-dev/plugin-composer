@@ -41,7 +41,7 @@
       },
       "x86_64-windows": {
         "path": "bin/x86_64-windows/phpforge-composer.exe",
-        "sha256": "177aed5d05c3dd01d0b677b00c853a65353d667abf4c82c7a03a55519bfea40e"
+        "sha256": "21e8882fd1d96feb5442dbba8a010544b8387050b93d5f3ef1e72eb1dbac4f75"
       }
     }
   }
