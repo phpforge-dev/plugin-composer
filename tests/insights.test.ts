@@ -67,3 +67,15 @@ test('resumo das consultas', () => {
  assert.equal(insightSummary({ updates, audit, outdated: [] }), '3 atualização(ões) disponível(is) · 2 aviso(s) de segurança em 1 pacote(s) · 1 abandonado(s) · nenhum desatualizado');
  assert.equal(insightSummary({}), '');
 });
+
+test('tipo da atualização (patch/minor/major) e inlays de versão como o PhpStorm', async () => {
+ const { updateKind, versionHints, lockVersions } = await import('../src/shared/composer-insights');
+ assert.deepEqual([updateKind('1.1.0', '1.1.4'), updateKind('1.0', '1.1'), updateKind('1.0.0', '2.0.2'), updateKind('v6.0.0', 'v6.4.49'), updateKind('1.2.3.4', '1.2.3.5'), updateKind('dev-main', '1.0.0')], ['patch', 'minor', 'major', 'minor', 'patch', 'other']);
+ const lock = lockVersions(JSON.stringify({ packages: [{ name: 'guzzlehttp/guzzle', version: '7.4.0' }, { name: 'psr/log', version: '1.1.0' }], 'packages-dev': [{ name: 'symfony/var-dumper', version: 'v6.0.0' }] }));
+ const hints = versionHints(json, lock, updates);
+ assert.deepEqual(hints.map(h => [h.name, h.label, h.kind ?? '']), [['guzzlehttp/guzzle', '7.4.0, updates to 7.16.1', 'minor'], ['psr/log', '1.1.0', ''], ['symfony/var-dumper', 'v6.0.0, updates to v6.4.49', 'minor']]);
+ assert.equal(json.slice(hints[0].offset - 1, hints[0].offset), ',', 'inlay depois da vírgula');
+ assert.equal(json.slice(hints[1].offset - 1, hints[1].offset), '"', 'último item: depois do valor');
+ assert.deepEqual(updateHints(json, updates).map(h => [h.name, h.kind]), [['guzzlehttp/guzzle', 'minor'], ['symfony/var-dumper', 'minor']], 'dependências indiretas fora do gutter');
+ assert.equal(lockVersions('{ruim').size, 0);
+});

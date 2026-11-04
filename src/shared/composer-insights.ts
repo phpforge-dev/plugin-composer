@@ -12,13 +12,14 @@ export type OutdatedPackage = { name: string; version: string; latest: string; s
 export type Insights = { updates?: PackageUpdate[]; audit?: AuditResult; outdated?: OutdatedPackage[] };
 
 /** Dependência declarada em `require`/`require-dev`, com a posição da chave (offsets). */
-export type Dependency = { name: string; section: 'require' | 'require-dev'; constraint: string; keyStart: number; keyEnd: number };
+export type Dependency = { name: string; section: 'require' | 'require-dev'; constraint: string; keyStart: number; keyEnd: number; valueEnd: number; hintAt: number };
 export function dependencies(text: string): Dependency[] {
  let root; try { root = parseJson(text); } catch { return []; }
  const out: Dependency[] = [];
  for (const section of ['require', 'require-dev'] as const) {
   const node = member(root, section)?.value;
-  if (node?.type === 'object') for (const e of node.entries) out.push({ name: e.key, section, constraint: e.value.type === 'string' ? e.value.value : '', keyStart: e.keyStart, keyEnd: e.keyEnd });
+  // `hintAt`: depois da vírgula que segue o valor, onde o PhpStorm põe a versão instalada.
+  if (node?.type === 'object') for (const e of node.entries) { const comma = /^\s*,/.exec(text.slice(e.value.end)); out.push({ name: e.key, section, constraint: e.value.type === 'string' ? e.value.value : '', keyStart: e.keyStart, keyEnd: e.keyEnd, valueEnd: e.value.end, hintAt: comma && !comma[0].includes('\n') ? e.value.end + comma[0].length : e.value.end }); }
  }
  return out;
 }
@@ -27,9 +28,32 @@ export function scriptKeys(text: string): { name: string; keyStart: number; keyE
 }
 const same = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
 
-/** Dicas de atualização só para dependências diretas, como o gutter do PhpStorm. */
+export type UpdateKind = 'major' | 'minor' | 'patch' | 'other';
+/** Tipo de atualização pela primeira parte numérica que muda (`v1.2` = 1.2.0); dev/branches: `other`. */
+export function updateKind(from: string, to: string): UpdateKind {
+ const parts = (v: string) => { const m = /^v?(\d+)(?:\.(\d+))?(?:\.(\d+))?(?:\.(\d+))?/i.exec(v.trim()); return m ? m.slice(1).map(x => Number(x ?? 0)) : null; };
+ const a = parts(from), b = parts(to); if (!a || !b) return 'other';
+ if (a[0] !== b[0]) return 'major'; if (a[1] !== b[1]) return 'minor'; return a[2] !== b[2] || a[3] !== b[3] ? 'patch' : 'other';
+}
+/** Dicas de atualização só para dependências diretas, como o gutter do PhpStorm (o ícone é o mesmo para qualquer tipo). */
 export function updateHints(text: string, updates: PackageUpdate[] = []) {
- return dependencies(text).flatMap(d => { const u = updates.find(x => same(x.name, d.name) && !x.downgrade); return u ? [{ ...d, from: u.from, to: u.to }] : []; });
+ return dependencies(text).flatMap(d => { const u = updates.find(x => same(x.name, d.name) && !x.downgrade); return u ? [{ ...d, from: u.from, to: u.to, kind: updateKind(u.from, u.to) }] : []; });
+}
+/**
+ * Inlay depois da restrição, como o PhpStorm: versão travada (`1.1.0`) e, com atualização dentro da
+ * restrição, `1.1.0, updates to 1.1.4`. `locked` vem do composer.lock (nome em minúsculas → versão).
+ */
+export function versionHints(text: string, locked: Map<string, string>, updates: PackageUpdate[] = []) {
+ return dependencies(text).flatMap(d => {
+  const version = locked.get(d.name.toLowerCase()); const u = updates.find(x => same(x.name, d.name) && !x.downgrade);
+  if (!version && !u) return [];
+  const from = u?.from ?? version!;
+  return [{ name: d.name, offset: d.hintAt, label: u ? `${from}, updates to ${u.to}` : from, ...(u ? { kind: updateKind(u.from, u.to) } : {}) }];
+ });
+}
+/** Versões do composer.lock (packages e packages-dev). */
+export function lockVersions(lockText: string | null | undefined): Map<string, string> {
+ try { const lock = JSON.parse(lockText ?? ''); return new Map([...(lock?.packages ?? []), ...(lock?.['packages-dev'] ?? [])].filter((p: any) => p?.name && p?.version).map((p: any) => [String(p.name).toLowerCase(), String(p.version)])); } catch { return new Map(); }
 }
 
 export type Problem = { keyStart: number; keyEnd: number; message: string; code: 'composer.vulnerable' | 'composer.vulnerable-indirect' | 'composer.abandoned'; severity: 'warning' | 'error'; name: string; link?: string };

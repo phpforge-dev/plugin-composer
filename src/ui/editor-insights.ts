@@ -1,4 +1,4 @@
-import { auditProblems, quickFixes, updateHints, type AuditResult, type Insights, type OutdatedPackage, type PackageUpdate } from '../shared/composer-insights';
+import { auditProblems, lockVersions, quickFixes, updateHints, versionHints, type AuditResult, type Insights, type OutdatedPackage, type PackageUpdate } from '../shared/composer-insights';
 import type { ComposerRequest } from '../shared/language/plugins/composer';
 
 // composer.json no editor: ícone "Update Package" no gutter para dependências diretas com versão
@@ -52,6 +52,11 @@ export function mountEditorInsights(o: Options) {
  }
 
  const decorations = new Map<any, any>();
+ // composer.lock lido para as versões instaladas nos inlays (relido quando o lock muda).
+ let locked = new Map<string, string>();
+ async function readLock() { try { locked = lockVersions((await o.api.read('composer.lock')).text); } catch { locked = new Map(); } render(); }
+ void readLock();
+ const kindLabel: Record<string, string> = { major: 'atualização major', minor: 'atualização minor', patch: 'atualização de patch', other: 'atualização' };
  function render() {
   for (const model of monaco.editor.getModels()) {
    if (!isComposerJson(model)) continue;
@@ -65,10 +70,17 @@ export function mountEditorInsights(o: Options) {
    const model = ed.getModel(); let collection = decorations.get(ed);
    if (!collection) { collection = ed.createDecorationsCollection(); decorations.set(ed, collection); }
    if (!isComposerJson(model)) { collection.clear(); continue; }
-   collection.set(updateHints(model.getValue(), insights.updates).map(h => {
+   const text = model.getValue();
+   // Mesmo ícone para patch/minor/major (observado no PhpStorm 2026.1); o tipo vai no hover e em data-kind.
+   const glyphs = updateHints(text, insights.updates).map(h => {
     const line = model.getPositionAt(h.keyStart).lineNumber;
-    return { range: new monaco.Range(line, 1, line, 1), options: { glyphMarginClassName: 'composer-update-glyph', glyphMarginHoverMessage: { value: `**${h.name}** ${h.from} → ${h.to}\n\n${o.tr('Atualização disponível. Clique para atualizar (composer update).')}` }, stickiness: 1 } };
-   }));
+    return { range: new monaco.Range(line, 1, line, 1), options: { glyphMarginClassName: `composer-update-glyph composer-update-${h.kind}`, glyphMarginHoverMessage: { value: `**${h.name}** ${h.from} → ${h.to} (${o.tr(kindLabel[h.kind])})\n\n${o.tr('Atualização disponível. Clique para atualizar (composer update).')}` }, stickiness: 1 } };
+   });
+   const inlays = versionHints(text, locked, insights.updates).map(h => {
+    const p = model.getPositionAt(h.offset);
+    return { range: new monaco.Range(p.lineNumber, p.column, p.lineNumber, p.column), options: { after: { content: h.label, inlineClassName: `composer-version-hint${h.kind ? ' composer-version-update' : ''}`, inlineClassNameAffectsLetterSpacing: true }, showIfCollapsed: true, stickiness: 1 } };
+   });
+   collection.set([...glyphs, ...inlays]);
   }
  }
  const hintAt = (model: any, line: number) => updateHints(model.getValue(), insights.updates).find(h => model.getPositionAt(h.keyStart).lineNumber === line);
@@ -92,16 +104,17 @@ export function mountEditorInsights(o: Options) {
    return { actions: fixes.map(f => ({ title: f.title, kind: f.kind, isPreferred: !!f.preferred, diagnostics: markers.filter((m: any) => f.codes?.some(c => code(m) === c || code(m).endsWith('/' + c))), command: { id: 'phpforge.composer.run', title: f.title, arguments: [f.request] } })), dispose() {} };
   },
  }, { providedCodeActionKinds: ['quickfix', 'refactor'] }));
+ // ⌥Enter vem do host (contexto `plugin-document`, IDE ≥ 0.2.19); repetir o atalho aqui abria o seletor de conflito.
  o.keymap.defineContext('composer-json', (el: Element | null) => !!el && editor.getContainerDomNode().contains(el) && isComposerJson(editor.getModel()));
- o.keymap.registerAction({ id: 'composer.showIntentions', label: 'Composer: mostrar correções e ações', category: 'Composer', aliases: 'composer quick fix intention alt enter', context: 'composer-json', defaults: { mac: 'Alt+Enter', other: 'Alt+Enter' }, run: () => editor.trigger('keyboard', 'editor.action.quickFix', {}) });
+ o.keymap.registerAction({ id: 'composer.showIntentions', label: 'Composer: mostrar correções e ações', category: 'Composer', aliases: 'composer quick fix intention alt enter', context: 'composer-json', defaults: {}, run: () => editor.trigger('keyboard', 'editor.action.quickFix', {}) });
 
- const changed = (event: Event) => { if (/(^|\/)composer\.(json|lock)$/.test(String((event as CustomEvent).detail?.path ?? ''))) schedule(); };
+ const changed = (event: Event) => { const path = String((event as CustomEvent).detail?.path ?? ''); if (/(^|\/)composer\.lock$/.test(path)) void readLock(); if (/(^|\/)composer\.(json|lock)$/.test(path)) schedule(); };
  window.addEventListener('ide-workspace-file-changed', changed); o.own(() => window.removeEventListener('ide-workspace-file-changed', changed));
  o.own(() => { clearTimeout(timer); epoch++; for (const m of monaco.editor.getModels()) monaco.editor.setModelMarkers(m, OWNER, []); for (const c of decorations.values()) c.clear(); });
  return {
   insights, check,
   /** Depois de uma execução do Composer: o lock mudou, refaz as consultas automáticas. */
-  afterRun(request: ComposerRequest) { if (pending || ['install', 'update', 'require', 'remove'].includes(request.action)) { pending = false; schedule(200); } },
+  afterRun(request: ComposerRequest) { void readLock(); if (pending || ['install', 'update', 'require', 'remove'].includes(request.action)) { pending = false; schedule(200); } },
   reset() { epoch++; clearTimeout(timer); running.clear(); for (const k of Object.keys(insights)) delete (insights as any)[k]; for (const k of Object.keys(errors)) delete (errors as any)[k]; render(); notify(); },
  };
 }

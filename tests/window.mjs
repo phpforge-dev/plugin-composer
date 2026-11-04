@@ -45,7 +45,7 @@ try{
   window.controller=activate({monaco,listen:async()=>()=>{},tr:s=>s,msg:html,html,keymap,dockWindow,resizeToolWindow(){},toolIcon,own:v=>v,api,host:{status(){},open:async()=>{},changed(){},editor}});
  },fixtures);
  const text=selector=>page.locator(selector).textContent();
- assert.ok((await page.evaluate(()=>window.actions)).includes('composer.showIntentions@composer-json:Alt+Enter'),'⌥Enter registered only for composer.json');
+ assert.ok((await page.evaluate(()=>window.actions)).includes('composer.showIntentions@composer-json:'),'intentions action without its own ⌥Enter (the host binds it for plugin documents)');
  await page.locator('#show-composer').click();
  await page.waitForFunction(()=>document.querySelectorAll('.composer-row').length===4);
  assert.deepEqual(await page.evaluate(()=>window.calls),[],'no automatic check without composer.json open in the editor');
