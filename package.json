@@ -8,6 +8,7 @@
     "build": "node build.mjs",
     "test": "cargo test --manifest-path native/Cargo.toml && node --import tsx --test tests/*.test.ts",
     "test:unit": "node --import tsx --test tests/*.test.ts",
+    "test:browser": "node tests/window.mjs",
     "build:native": "cargo build --release --manifest-path native/Cargo.toml"
   },
   "devDependencies": {
